@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-frontend
+  labels:
+    app: {{ .Release.Name }}-frontend
+spec:
+  replicas: {{ .Values.frontend.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-frontend
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"
+          # Never pull from registry — image loaded locally via `minikube image load`
+          imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
+          ports:
+            - containerPort: 80
+          # Frontend only needs non-sensitive config (no secrets at runtime).
+          # VITE_API_BASE_URL is baked into the image at build time (Vite build arg)
+          # so no runtime env injection is needed for the API URL.
+          envFrom:
+            - configMapRef:
+                name: {{ .Release.Name }}-config
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            # 5s: nginx serves static files immediately — no subprocess startup needed
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}

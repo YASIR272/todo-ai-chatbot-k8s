@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-backend
+  labels:
+    app: {{ .Release.Name }}-backend
+spec:
+  # ClusterIP: backend is only reachable from within the cluster (from the frontend pod).
+  # The frontend's VITE_API_BASE_URL is set to http://todo-chatbot-backend:8000 at build time.
+  type: {{ .Values.backend.service.type }}
+  selector:
+    app: {{ .Release.Name }}-backend
+  ports:
+    - protocol: TCP
+      port: {{ .Values.backend.service.port }}
+      targetPort: 8000

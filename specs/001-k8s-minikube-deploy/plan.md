@@ -1,0 +1,373 @@
+# Implementation Plan: Phase IV – Local Kubernetes Deployment
+
+**Branch**: `001-k8s-minikube-deploy` | **Date**: 2026-02-23 | **Spec**: [spec.md](./spec.md)
+**Input**: Feature specification from `/specs/001-k8s-minikube-deploy/spec.md`
+
+## Summary
+
+Containerize the existing Phase III Todo AI Chatbot (React/ChatKit frontend +
+FastAPI/MCP/Agents backend) into two Docker images using multi-stage builds,
+then deploy them to a local Minikube cluster via a Helm 3 chart. No application
+code is modified — this phase is purely infrastructure. All artifacts are
+generated through the Spec → Plan → Tasks → Claude Code workflow. kubectl-ai
+and Kagent are used for AI-assisted operations and are documented in the README.
+
+## Technical Context
+
+**Language/Version**: Python 3.11 (backend), Node 20 LTS (frontend build), nginx 1.25 (frontend runtime)
+**Primary Dependencies**: FastAPI, uvicorn, openai-agents, mcp, sqlmodel, pydantic-settings (backend); React 18, Vite 6, TypeScript 5 (frontend); Helm 3, kubectl, Minikube (infra)
+**Storage**: Neon PostgreSQL (external, accessed via `DATABASE_URL` env var in K8s Secret); no local DB in pods
+**Testing**: `docker build` + `docker run` smoke tests; `helm install` on Minikube; `curl /health`; end-to-end browser test
+**Target Platform**: Windows 10 host, Minikube with docker driver (Linux container runtime)
+**Project Type**: Web application (separate backend + frontend containers)
+**Performance Goals**: Backend ≤500 MB image, frontend ≤300 MB image; all pods Running within 120s; chatbot UI responds within 5s
+**Constraints**: Standard Docker CLI only (no Gordon); Minikube local only; no cloud; non-root containers; no hardcoded secrets; VITE_API_BASE_URL must be handled at runtime via nginx envsubst (Vite bakes env vars at build time)
+**Scale/Scope**: 1 replica each (Phase IV); Neon DB shared across restarts
+
+## Constitution Check
+
+*GATE: Must pass before Phase 0 research. Re-checked after Phase 1 design.*
+
+| Principle | Gate | Status |
+|-----------|------|--------|
+| I — Strict Requirements Adherence | Existing Phase III app code MUST NOT be modified. Port 8000 (backend), port 80 (frontend). Tech stack: Docker CLI, Minikube, Helm 3, kubectl-ai, Kagent. | ✅ PASS — plan uses exact specified stack; no code changes |
+| II — Agentic Development Only | All Dockerfiles, Helm charts, manifests, README, scripts generated via Claude Code tasks. No manual CLI commands in deliverables. | ✅ PASS — 9-task breakdown generates all artifacts agentically |
+| III — Stateless, Scalable Design | Pods must be stateless; all persistence via external Neon DB; pod deletion must not lose data. | ✅ PASS — `DATABASE_URL` K8s Secret points to Neon; no SQLite in K8s |
+| IV — Security at Every Layer | API keys, DB URL, auth secret → K8s Secret. No hardcoded values in images or charts. Non-root container users. | ✅ PASS — Secret template; values.yaml uses placeholder defaults; build args excluded from final image |
+| V — Clean Code & Separation | Frontend and backend each have own Dockerfile, Deployment, Service. | ✅ PASS — fully separate image and manifest paths |
+| VI — Full Reproducibility | README with copy-pasteable commands from clone to running chatbot. | ✅ PASS — README section planned with all steps |
+| VII — Spec-Driven Infrastructure | kubectl-ai + Kagent used and documented. All artifacts from spec-kit tasks. | ✅ PASS — Task 9 covers kubectl-ai/Kagent examples |
+
+**Constitution Check PASSED** — proceed to Phase 0.
+
+## Project Structure
+
+### Documentation (this feature)
+
+```text
+specs/001-k8s-minikube-deploy/
+├── plan.md              # This file
+├── research.md          # Phase 0 decisions and rationale
+├── data-model.md        # Infrastructure entities (images, chart, K8s resources)
+├── quickstart.md        # Step-by-step local setup guide
+├── contracts/
+│   └── api-contract.md  # Backend API endpoints reference for health probes + frontend
+└── tasks.md             # Phase 2 output (/sp.tasks command)
+```
+
+### Source Code (repository root)
+
+```text
+src/
+├── backend/             # Phase III FastAPI app (READ ONLY — no changes)
+│   ├── main.py          # FastAPI app, GET /health endpoint (probe target)
+│   ├── agent.py         # OpenAI/Groq agent + MCP lifecycle
+│   ├── mcp_server.py    # FastMCP stdio server (5 task tools)
+│   ├── config.py        # pydantic-settings, all env vars
+│   ├── database.py      # SQLModel engine, PostgreSQL pooling
+│   ├── models.py        # Task, Conversation, Message tables
+│   ├── crud.py, schemas.py, auth.py
+│   ├── routes/          # tasks.py, chat.py
+│   ├── tests/           # test_chat.py, test_mcp_tools.py
+│   ├── requirements.txt
+│   └── .env.example
+└── frontend/            # Phase III React/ChatKit UI (READ ONLY — no changes)
+    ├── src/config.ts    # VITE_API_BASE_URL injection point
+    ├── src/App.tsx, src/main.tsx
+    ├── index.html, vite.config.ts, package.json, tsconfig.json
+
+docker/                  # Phase IV NEW — generated by Tasks 1–2
+├── backend/
+│   ├── Dockerfile       # Multi-stage: python:3.11-slim builder + runtime
+│   └── .dockerignore
+└── frontend/
+    ├── Dockerfile       # Multi-stage: node:20-slim builder + nginx:alpine runtime
+    ├── .dockerignore
+    └── nginx.conf       # nginx config with envsubst for BACKEND_URL
+
+helm/                    # Phase IV NEW — generated by Tasks 3–7
+└── todo-chatbot/
+    ├── Chart.yaml
+    ├── values.yaml
+    └── templates/
+        ├── backend-deployment.yaml
+        ├── backend-service.yaml
+        ├── frontend-deployment.yaml
+        ├── frontend-service.yaml
+        ├── configmap.yaml
+        └── secret.yaml
+
+scripts/                 # Phase IV NEW — generated by Task 9
+└── verify-chatbot.sh    # Optional smoke test script
+
+README.md                # Updated with Phase IV section (Task 8)
+```
+
+**Structure Decision**: Web application (Option 2) with separate backend and
+frontend containers. Source code is read-only from Phase III. All Phase IV
+new artifacts live in `docker/`, `helm/`, `scripts/`, and updated `README.md`.
+
+## Complexity Tracking
+
+> No constitution violations — no entries required.
+
+---
+
+## Phase 0: Research & Decisions
+
+*See `research.md` for full rationale. Summary of all key decisions:*
+
+### D-001 — Backend Base Image: `python:3.11-slim`
+
+**Decision**: Use `python:3.11-slim` (not alpine).
+**Rationale**: `python:3.11-alpine` requires rebuilding compiled extensions (cryptography, bcrypt) from source, adding build time and fragility. `slim` gives a smaller-than-full Debian base with binary wheels available. The `openai-agents` + `mcp` stack has C extensions; alpine compatibility is unreliable.
+**Target size**: ~350–450 MB with all dependencies.
+**Multi-stage**: Stage 1 (`builder`) installs dependencies into `/install`; Stage 2 (`runtime`) copies only `/install` + app code. Saves ~80–120 MB vs. single-stage.
+
+### D-002 — Frontend Base Images: `node:20-slim` + `nginx:alpine`
+
+**Decision**: Multi-stage — `node:20-slim` for building Vite assets, `nginx:alpine` for serving.
+**Rationale**: Node image is only used for `npm ci && npm run build`; the runtime image is pure nginx serving static files — results in a very small image (~50–80 MB). Alpine is safe for nginx (no C extension issues).
+
+### D-003 — VITE_API_BASE_URL: nginx envsubst at runtime
+
+**Decision**: Use `nginx envsubst` with a template `nginx.conf` to inject `BACKEND_URL` at container startup, and update `src/frontend/src/config.ts` to use `window.__BACKEND_URL__` as the runtime override.
+
+**Rationale**: Vite replaces `import.meta.env.VITE_*` at **build time**, making the value baked into the JS bundle. This is incompatible with a single portable Docker image that can be deployed against different backend URLs. The envsubst pattern is the standard K8s solution: the nginx Docker entrypoint calls `envsubst '${BACKEND_URL}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf` before starting nginx.
+
+**Implementation**: Since we cannot modify `src/frontend/src/config.ts` (Phase III code is read-only per constitution), we instead set `VITE_API_BASE_URL` as a **Docker build argument** during `docker build`. The Minikube deployment will build the image with the correct K8s service URL baked in. The README will document using `--build-arg VITE_API_BASE_URL=http://todo-chatbot-backend:8000`. This is acceptable because the URL (`http://todo-chatbot-backend:8000`) is a fixed K8s internal service DNS name — not a secret.
+
+**Alternative rejected**: envsubst (would require modifying the frontend JS bundle pattern — intrusive).
+
+### D-004 — Secrets Handling: Helm Secret template + `helm install --set`
+
+**Decision**: The `secret.yaml` template uses `{{ .Values.secrets.* }}` placeholders with empty string defaults. Developers supply real values via `helm install --set secrets.groqApiKey=xxx` or a local `values.override.yaml` (gitignored).
+**Rationale**: Never commit real API keys. `values.yaml` ships with empty/placeholder defaults. The README documents the `--set` pattern and warns against committing overrides.
+**Alternative rejected**: External secret manager (overkill for local Minikube Phase IV).
+
+### D-005 — Image Loading: `minikube image load`
+
+**Decision**: Build locally with `docker build`, then load into Minikube with `minikube image load`. No external registry required.
+**Rationale**: Simplest path for local-only deployment. The Minikube docker driver shares a Docker daemon, so images built on host are accessible via `minikube image load` (or by setting `eval $(minikube docker-env)` before build).
+**imagePullPolicy**: Set to `Never` in Helm templates to prevent K8s trying to pull from DockerHub.
+
+### D-006 — Service Type: `NodePort` + `minikube service`
+
+**Decision**: Frontend service type `NodePort`. Backend service type `ClusterIP` (internal only, frontend accesses it via K8s DNS).
+**Rationale**: `NodePort` + `minikube service todo-chatbot-frontend` is the simplest path for Windows Minikube access. `LoadBalancer` requires `minikube tunnel` which needs admin rights. `ClusterIP` for backend is correct security posture (not directly accessible from host).
+**kubectl-ai example**: `kubectl-ai "expose the todo frontend service as NodePort"`.
+
+### D-007 — Replicas: 1 for both services
+
+**Decision**: `replicaCount: 1` as default in `values.yaml` for both frontend and backend.
+**Rationale**: Phase IV goal is functional local deployment, not scaling. Demonstrates the K8s pattern; developers can scale with `helm upgrade --set backend.replicaCount=2` or via kubectl-ai.
+
+### D-008 — Resource Limits: conservative defaults for Minikube
+
+**Decision**:
+- Backend: `requests: {cpu: 200m, memory: 256Mi}`, `limits: {cpu: 500m, memory: 512Mi}`
+- Frontend: `requests: {cpu: 50m, memory: 64Mi}`, `limits: {cpu: 100m, memory: 128Mi}`
+**Rationale**: Minikube on Windows 10 with 4 GB RAM is the minimum. The openai-agents SDK is memory-hungry during agent startup. Backend at 256Mi request + 512Mi limit leaves headroom for Minikube system pods. Frontend (nginx) is very lightweight.
+
+### D-009 — Health Probes
+
+**Decision**:
+- Backend liveness: `httpGet /health :8000`, `initialDelaySeconds: 30`, `periodSeconds: 10`
+- Backend readiness: `httpGet /health :8000`, `initialDelaySeconds: 10`, `periodSeconds: 5`
+- Frontend liveness: `httpGet / :80`, `initialDelaySeconds: 5`, `periodSeconds: 10`
+- Frontend readiness: `httpGet / :80`, `initialDelaySeconds: 3`, `periodSeconds: 5`
+**Rationale**: Backend needs a longer initial delay (30s) because `startup_agent()` initializes the MCP subprocess + LLM provider check on startup. The `/health` endpoint already performs a `SELECT 1` DB check. Frontend nginx starts instantly, so short delays suffice.
+
+### D-010 — kubectl-ai and Kagent integration
+
+**Decision**: Document 5 kubectl-ai examples and 2 Kagent examples in the README troubleshooting section.
+**Examples**:
+- `kubectl-ai "show me all pods in the default namespace"`
+- `kubectl-ai "describe the todo-chatbot-backend deployment"`
+- `kubectl-ai "scale the backend deployment to 2 replicas"`
+- `kubectl-ai "get the logs of the todo-chatbot-backend pod"`
+- `kubectl-ai "why is my pod in CrashLoopBackOff"`
+- `kagent run "analyze the health of the todo-chatbot deployment"`
+- `kagent run "list all services and their endpoints"`
+
+---
+
+## Phase 1: Design Artifacts
+
+*See `data-model.md`, `contracts/api-contract.md`, and `quickstart.md` for full details.*
+
+### Infrastructure Entities
+
+| Entity | Key Attributes | Notes |
+|--------|---------------|-------|
+| Docker Image: `todo-backend` | Base: python:3.11-slim; Port: 8000; User: appuser; Size target: <500 MB | Multi-stage build |
+| Docker Image: `todo-frontend` | Base: node:20-slim + nginx:alpine; Port: 80; User: nginx; Size target: <300 MB | Static files + nginx |
+| Helm Chart: `todo-chatbot` | Version: 0.1.0; appVersion: 2.0.0; Namespace: default | Single chart, no subcharts |
+| K8s Deployment: `todo-chatbot-backend` | replicas: 1; image: todo-backend:1.0.0; probes on /health:8000 | Env from ConfigMap + Secret |
+| K8s Deployment: `todo-chatbot-frontend` | replicas: 1; image: todo-frontend:1.0.0; probes on /:80 | VITE_API_BASE_URL baked at build time |
+| K8s Service: `todo-chatbot-backend` | Type: ClusterIP; port: 8000 | Internal only |
+| K8s Service: `todo-chatbot-frontend` | Type: NodePort; port: 80 | Exposed via minikube service |
+| K8s ConfigMap: `todo-chatbot-config` | HOST, PORT, FRONTEND_ORIGIN, CORS_ORIGINS, LLM_PROVIDER, GROQ_MODEL | Non-sensitive |
+| K8s Secret: `todo-chatbot-secret` | DATABASE_URL, OPENAI_API_KEY, GROQ_API_KEY, BETTER_AUTH_SECRET | Base64 encoded |
+
+### Environment Variable Classification
+
+**K8s Secret** (sensitive):
+- `DATABASE_URL` — Neon PostgreSQL connection string
+- `GROQ_API_KEY` — Groq API key
+- `OPENAI_API_KEY` — OpenAI API key
+- `BETTER_AUTH_SECRET` — JWT signing secret
+
+**K8s ConfigMap** (non-sensitive):
+- `HOST=0.0.0.0`
+- `PORT=8000`
+- `FRONTEND_ORIGIN=http://localhost` (updated for Minikube NodePort URL)
+- `CORS_ORIGINS=""` (wildcard CORS is already hardcoded in main.py)
+- `LLM_PROVIDER=""` (auto-detect)
+- `GROQ_MODEL=meta-llama/llama-4-scout-17b-16e-instruct`
+
+**Docker Build ARG** (frontend only, baked into image):
+- `VITE_API_BASE_URL=http://todo-chatbot-backend:8000`
+
+### Helm `values.yaml` Structure
+
+```yaml
+# Image settings
+backend:
+  image:
+    repository: todo-backend
+    tag: "1.0.0"
+    pullPolicy: Never
+  replicaCount: 1
+  service:
+    type: ClusterIP
+    port: 8000
+  resources:
+    requests: { cpu: 200m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+
+frontend:
+  image:
+    repository: todo-frontend
+    tag: "1.0.0"
+    pullPolicy: Never
+  replicaCount: 1
+  service:
+    type: NodePort
+    port: 80
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 100m, memory: 128Mi }
+
+# ConfigMap (non-sensitive)
+config:
+  host: "0.0.0.0"
+  port: "8000"
+  frontendOrigin: "http://localhost"
+  corsOrigins: ""
+  llmProvider: ""
+  groqModel: "meta-llama/llama-4-scout-17b-16e-instruct"
+
+# Secrets (supply via --set or values.override.yaml — NEVER commit real values)
+secrets:
+  databaseUrl: "postgresql://user:pass@host/db"   # REPLACE
+  groqApiKey: ""
+  openaiApiKey: ""
+  betterAuthSecret: "change-me-in-production"
+```
+
+---
+
+## Implementation Task Breakdown
+
+> Full tasks generated by `/sp.tasks`. Summary below for planning purposes.
+
+| Task | Description | Artifact | Dependency |
+|------|-------------|----------|-----------|
+| T001 | Backend Dockerfile (multi-stage, non-root, port 8000) | `docker/backend/Dockerfile` | None |
+| T002 | Backend .dockerignore | `docker/backend/.dockerignore` | None |
+| T003 | Frontend Dockerfile (Node build + nginx runtime, build-arg) | `docker/frontend/Dockerfile` | None |
+| T004 | Frontend .dockerignore | `docker/frontend/.dockerignore` | None |
+| T005 | nginx.conf for frontend container | `docker/frontend/nginx.conf` | T003 |
+| T006 | Helm Chart.yaml | `helm/todo-chatbot/Chart.yaml` | None |
+| T007 | Helm values.yaml | `helm/todo-chatbot/values.yaml` | T006 |
+| T008 | Backend Deployment template | `helm/todo-chatbot/templates/backend-deployment.yaml` | T007 |
+| T009 | Backend Service template | `helm/todo-chatbot/templates/backend-service.yaml` | T007 |
+| T010 | Frontend Deployment template | `helm/todo-chatbot/templates/frontend-deployment.yaml` | T007 |
+| T011 | Frontend Service template | `helm/todo-chatbot/templates/frontend-service.yaml` | T007 |
+| T012 | ConfigMap template | `helm/todo-chatbot/templates/configmap.yaml` | T007 |
+| T013 | Secret template | `helm/todo-chatbot/templates/secret.yaml` | T007 |
+| T014 | Update README.md — Phase IV section | `README.md` | T001–T013 |
+| T015 | Verification script | `scripts/verify-chatbot.sh` | T014 |
+
+---
+
+## Testing Strategy
+
+### 1. Local Docker Smoke Tests (before Minikube)
+
+```bash
+# Backend
+docker build -t todo-backend:1.0.0 -f docker/backend/Dockerfile .
+docker run --rm -p 8000:8000 \
+  -e DATABASE_URL="<neon-url>" \
+  -e GROQ_API_KEY="<key>" \
+  todo-backend:1.0.0
+curl http://localhost:8000/health
+# Expected: {"status":"healthy","database":"connected"}
+
+# Frontend
+docker build \
+  --build-arg VITE_API_BASE_URL=http://localhost:8000 \
+  -t todo-frontend:1.0.0 \
+  -f docker/frontend/Dockerfile .
+docker run --rm -p 3000:80 todo-frontend:1.0.0
+curl http://localhost:3000/
+# Expected: 200 OK, HTML response with ChatKit UI
+```
+
+### 2. Minikube Deployment Tests
+
+```bash
+minikube start --cpus=2 --memory=4096 --driver=docker
+minikube image load todo-backend:1.0.0
+minikube image load todo-frontend:1.0.0
+helm install todo-chatbot helm/todo-chatbot \
+  --set secrets.databaseUrl="<neon-url>" \
+  --set secrets.groqApiKey="<key>"
+kubectl get pods --watch   # Wait for Running
+minikube service todo-chatbot-frontend
+```
+
+### 3. Resilience Tests
+
+```bash
+# Pod restart — data persistence
+kubectl delete pod -l app=todo-chatbot-backend
+kubectl get pods --watch   # New pod appears
+# Navigate to chatbot — previous tasks still visible
+
+# Clean uninstall
+helm uninstall todo-chatbot
+kubectl get all   # Only default kubernetes service remains
+```
+
+### 4. kubectl-ai / Kagent Validation
+
+```bash
+kubectl-ai "describe the todo-chatbot-backend deployment"
+kubectl-ai "scale the todo-chatbot-backend deployment to 2 replicas"
+kagent run "analyze the health of all pods in the default namespace"
+```
+
+---
+
+## Risks and Mitigations
+
+| Risk | Impact | Mitigation |
+|------|--------|-----------|
+| `openai-agents` image exceeds 500 MB | SC-002 failure | Use `--no-cache-dir` pip flag; multi-stage copy only `/install`; verify size with `docker images` |
+| Neon DB cold-start delays backend startup | Probe failures, pod restart loop | `pool_pre_ping=True` already set; increase `initialDelaySeconds` to 45 if needed |
+| MCP subprocess fails to start inside container | Chat completely broken | Ensure `mcp_server.py` + all Python files in same `WORKDIR`; use correct `sys.executable` path |
+| Minikube memory pressure on Windows | Pods evicted | Resource limits set conservatively; document `minikube config set memory 4096` |
+| VITE_API_BASE_URL baked to wrong URL | Frontend can't reach backend | Build ARG documented in README; Minikube NodePort URL obtained via `minikube service` |

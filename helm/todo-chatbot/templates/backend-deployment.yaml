@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-backend
+  labels:
+    app: {{ .Release.Name }}-backend
+spec:
+  replicas: {{ .Values.backend.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-backend
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-backend
+    spec:
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          # Never pull from registry — image loaded locally via `minikube image load`
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          ports:
+            - containerPort: 8000
+          # Both ConfigMap (non-sensitive) and Secret (sensitive) vars are injected.
+          # The MCP stdio subprocess (mcp_server.py) inherits ALL these env vars
+          # automatically because it is a child process forked by agent.py.
+          # No separate MCP-specific env section is needed.
+          envFrom:
+            - configMapRef:
+                name: {{ .Release.Name }}-config
+            - secretRef:
+                name: {{ .Release.Name }}-secret
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            # 30s initial delay: accounts for Agent.startup_agent() initialising
+            # MCPServerStdio subprocess + LLM provider client (typically 5-20s)
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            # 15s: readiness checked sooner than liveness so traffic only routes
+            # once the agent AND the MCP subprocess are both ready
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}

@@ -1,0 +1,12 @@
+__pycache__/
+node_modules/
+*.db
+.venv/
+venv/
+.env
+*.egg-info
+.pytest_cache/
+tests/
+package-lock.json
+package.json
+nul

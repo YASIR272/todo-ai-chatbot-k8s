@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+data:
+  HOST: {{ .Values.config.host | quote }}
+  PORT: {{ .Values.config.port | quote }}
+  FRONTEND_ORIGIN: {{ .Values.config.frontendOrigin | quote }}
+  CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
+  LLM_PROVIDER: {{ .Values.config.llmProvider | quote }}
+  GROQ_MODEL: {{ .Values.config.groqModel | quote }}

@@ -1,0 +1,57 @@
+# ── Backend ───────────────────────────────────────────────────────────────────
+# The backend container runs TWO processes:
+#   1. uvicorn (FastAPI) on port 8000 — the HTTP server
+#   2. mcp_server.py   (MCP stdio subprocess) — launched by agent.py at startup
+# Both live in the same container image. No separate MCP deployment is needed.
+backend:
+  image:
+    repository: todo-backend
+    tag: "1.0.0"
+    pullPolicy: Never        # Local Minikube — never pull from registry
+  replicaCount: 1
+  service:
+    type: ClusterIP          # Internal only — frontend talks to backend inside the cluster
+    port: 8000
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi          # openai-agents SDK + MCP subprocess are memory-intensive
+
+# ── Frontend ──────────────────────────────────────────────────────────────────
+frontend:
+  image:
+    repository: todo-frontend
+    tag: "1.0.0"
+    pullPolicy: Never
+  replicaCount: 1
+  service:
+    type: NodePort           # NodePort — accessible from host via `minikube service`
+    port: 80
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+
+# ── ConfigMap (non-sensitive env vars) ───────────────────────────────────────
+config:
+  host: "0.0.0.0"
+  port: "8000"
+  # Frontend service DNS name inside the cluster (used for CORS)
+  frontendOrigin: "http://todo-chatbot-frontend"
+  corsOrigins: ""
+  llmProvider: "groq"        # "groq" (free) or "openai"
+  groqModel: "meta-llama/llama-4-scout-17b-16e-instruct"
+
+# ── Secrets (NEVER commit real values — supply via --set or values.override.yaml) ──
+# values.override.yaml is gitignored; use it for local development
+secrets:
+  databaseUrl: ""            # postgresql://user:pass@host/db?sslmode=require  (Neon)
+  groqApiKey: ""             # gsk_...
+  openaiApiKey: ""           # sk-... (leave empty if using Groq)
+  betterAuthSecret: "change-me-in-production"   # JWT signing secret

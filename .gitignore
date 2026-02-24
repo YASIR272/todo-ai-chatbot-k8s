@@ -1,0 +1,38 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+helm/todo-chatbot/values.override.yaml
+*.secret.yaml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+dist/
+.next/
+
+# OS
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Docker build cache
+.docker/
+
+# Logs
+*.log
