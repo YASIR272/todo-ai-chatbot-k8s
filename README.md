@@ -98,11 +98,12 @@ docker build \
 
 # Frontend image (~50–80 MB)
 # VITE_API_BASE_URL is baked into the static JS bundle at build time
+# Build context must be project root (Dockerfile references both src/frontend/ and docker/frontend/)
 docker build \
   --build-arg VITE_API_BASE_URL=http://todo-chatbot-backend:8000 \
   -t todo-frontend:1.0.0 \
   -f docker/frontend/Dockerfile \
-  src/frontend/
+  .
 ```
 
 Verify image sizes:
